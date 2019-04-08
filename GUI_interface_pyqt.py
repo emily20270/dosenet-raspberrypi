@@ -8,11 +8,12 @@ Created on Fri Nov 9 2018
 import sys
 import numpy as np
 import math
-import datetime as dt
 import time
+import datetime as dt
 import csv
 import sys
 import os
+import pika
 import json
 import atexit
 import traceback
@@ -91,10 +92,11 @@ class App(QWidget):
         self.plot_list = {}
         self.err_list = {}
         self.sensor_list = {}
+        self.sensor_tab = {}
         self.data_display = {}
         self.data = {}
         self.time_data = {}
-        self.saveData = True
+        self.saveData = False
         self.channels = np.arange(self.nbins, dtype=float) * 2.55
         self.initUI()
 
@@ -119,7 +121,7 @@ class App(QWidget):
                 "QTabWidget::pane { border: 2px solid #404040; } "+\
                 "QTabBar {font-size: 10pt;}");
         tab_bar = QTabBar()
-        tab_bar.setStyleSheet("QTabBar::tab { height: 50px; width: 260px;}")
+        tab_bar.setStyleSheet("QTabBar::tab { height: 20px; width: 100px;}")
         self.tabs.setTabBar(tab_bar)
         ptop, pleft, pheight, pwidth = 0, 0, 12, 12
         self.layout.addWidget(self.tabs,ptop,pleft,pheight,pwidth)
@@ -169,7 +171,7 @@ class App(QWidget):
                            "border-width: 3px;"+\
                            "border-radius: 2px;"+\
                            "border-color: beige;"+\
-                           "font: bold 40px;"+\
+                           "font: bold 20px;"+\
                            "min-width: 10em;"+\
                            "padding: 3px;"
 
@@ -189,15 +191,44 @@ class App(QWidget):
         checkbox.setChecked(False)
         checkbox.stateChanged.connect(lambda:self.sensorButtonState(checkbox))
         self.layout.addWidget(checkbox,top,left,1,1,Qt.AlignHCenter)
+        
+    def rmvSensorTab(self, sensor):
+        '''
+        Remove Sensor Tab from GUI
+        '''
+        self.tabs.removeTab(self.sensor_tab[sensor][0])
+        self.kill_sensor(sensor)
 
 
     def startSensor(self, sensor):
+        fname = "/home/pi/data/" + self.file_prefix + '_' + \
+                str(dt.datetime.today()).split()[0]
         if sensor==AIR:
-            cmd = 'python /home/pi/dosenet-raspberrypi/air_quality_DAQ.py {} > /tmp/AQ.log 2>&1 &'.format(self.integration_time)
+            py = 'python'
+            script = 'air_quality_DAQ.py'
+            log = 'AQ_gui.log'
+            if self.saveData:
+                fname = fname + "_AQ.csv"
         if sensor==RAD:
-            cmd = 'sudo python /home/pi/dosenet-raspberrypi/D3S_rabbitmq_DAQ.py -i {} > /tmp/rad.log 2>&1 &'.format(self.integration_time)
+            py = 'sudo python'
+            script = 'D3S_rabbitmq_DAQ.py'
+            log = 'rad_gui.log'
+            if self.saveData:
+                fname = fname + "_D3S.csv"
         if sensor==CO2:
-            cmd = 'python /home/pi/dosenet-raspberrypi/'.format(self.integration_time)
+            py = 'python'
+            script = 'adc_DAQ.py'
+            log = 'CO2_gui.log'
+            if self.saveData:
+                fname = fname + "_CO2.csv"
+ 
+        cmd_head = '{} /home/pi/dosenet-raspberrypi/{}'.format(py, script)
+        cmd_options = ' -i {}'.format(self.integration_time)
+        if self.saveData:
+            cmd_options = cmd_options + ' -d {}'.format(fname)
+        cmd_log = ' > /tmp/{} 2>&1 &'.format(log)
+        cmd = cmd_head + cmd_options + cmd_log
+
         print(cmd)
         os.system(cmd)
 
@@ -207,8 +238,8 @@ class App(QWidget):
         print("{} is selected".format(b.text()))
         self.addSensor(b.text())
      else:
-        #TODO add method to delete sensor from sensor list dict and remove tab
         print("{} is deselected".format(b.text()))
+        self.rmvSensorTab(b.text())
 
 
     def setDisplayText(self, sensor):
@@ -231,7 +262,7 @@ class App(QWidget):
         integration_text.setFont(textfont)
         integration_text.setAlignment(Qt.AlignCenter)
         integration_box = QComboBox()
-        item_list = ["1","2","3","4","5","10","15","20","30","60"]
+        item_list = ["1","2","3","4","5","10","15","20","30","60","120","300"]
         self.integration_time = 2
         integration_box.addItems(item_list)
         integration_box.setCurrentIndex(1)
@@ -253,7 +284,7 @@ class App(QWidget):
 
         checkbox = QCheckBox("Save Data")
         checkbox.setFont(textfont)
-        checkbox.setChecked(True)
+        checkbox.setChecked(False)
         checkbox.stateChanged.connect(lambda:self.setSaveData(checkbox))
         self.config_layout.addWidget(checkbox)
 
@@ -291,7 +322,19 @@ class App(QWidget):
                 lambda:self.setLocation(str(self.location_box.currentText())))
         self.config_layout.addRow(self.location_text,self.location_box)
 
+        self.textbox = QLineEdit()
+        self.setFilename()
+        self.textbox.textChanged.connect(self.updateFilename)
+        self.config_layout.addWidget(self.textbox)
+
         self.selection_tab.setLayout(self.config_layout)
+        self.group_text.close()
+        self.group_box.close()
+        self.ptext.close()
+        self.pbox.close()
+        self.textbox.close()
+        self.location_text.close()
+        self.location_box.close()
 
 
     def setSaveData(self,b):
@@ -304,6 +347,7 @@ class App(QWidget):
             self.pbox.show()
             self.location_text.show()
             self.location_box.show()
+            self.textbox.show()
         else:
             self.saveData = False
             self.group_text.close()
@@ -312,9 +356,10 @@ class App(QWidget):
             self.pbox.close()
             self.location_text.close()
             self.location_box.close()
+            self.textbox.close()
 
 
-    def setIntegrationTime(self,):
+    def setIntegrationTime(self,text):
         self.integration_time = int(text)
 
 
@@ -324,14 +369,28 @@ class App(QWidget):
 
     def setGroupID(self,text):
         self.group_id = text
+        self.setFilename()
 
 
     def setPeriodID(self,text):
         self.period_id = text
+        self.setFilename()
 
 
     def setLocation(self,text):
         self.location = text
+        self.setFilename()
+
+
+    def updateFilename(self,text):
+        self.file_prefix = self.textbox.text()
+
+
+    def setFilename(self):
+        self.file_prefix = '{}_p{}_g{}'.format(self.location,
+                                               self.period_id,
+                                               self.group_id)
+        self.textbox.setText(self.file_prefix)
 
 
     def addSensor(self, sensor):
@@ -347,8 +406,12 @@ class App(QWidget):
         Setup the tab and layout for the selected sensor, initialize plots, etc.
         '''
         # Create canvas for plots
+        if sensor in self.sensor_tab:
+            self.tabs.insertTab(self.sensor_tab[sensor][0],self.sensor_tab[sensor][1])
+            return
         itab = QWidget()
-        self.tabs.addTab(itab, sensor)
+        index = self.tabs.addTab(itab, sensor)
+        self.sensor_tab[sensor] = [index,itab]
         tablayout = QGridLayout()
         tablayout.setSpacing(0.)
         tablayout.setContentsMargins(0.,0.,0.,0.)
@@ -490,17 +553,6 @@ class App(QWidget):
             
         self.setDisplayText(sensor)
         
-        
-
-
-    def setOutputFile(self, sensor):
-        if sensor==AIR:
-            if self.saveData:
-                fname = "/home/pi/data/AQ_G" + self.group_id + "_P" + \
-                        self.period_id + "_" + self.location + "_" + \
-                        str(dt.datetime.today()).split()[0]+".csv"
-                #self.aq_daq.create_file(fname)
-
 
     def initSensorData(self,sensor):
         '''
@@ -773,6 +825,9 @@ class App(QWidget):
             print('ERROR: GUI quit unexpectedly!')
             traceback.print_exc()
 
+    def kill_sensor(self, sensor):
+        send_queue_cmd('EXIT',sensor)
+
     def exit(self):
         '''
         Send EXIT command to all sensors
@@ -782,49 +837,6 @@ class App(QWidget):
 
 
 
-#-------------------------------------------------------------------------------
-# Class for handling writing data to files/sending to RPi server
-#-------------------------------------------------------------------------------
-class FileManager():
-    def __init__(self):
-        # Define basic stuff here
-        self.out_file = None
-        self.results = None
-
-
-    def create_file(self, fname = None):
-        file_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime())
-        id_info = []
-        with open ('/home/pi/config/server_config.csv') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                id_info.append(row)
-        if fname is None:
-            filename =  "/home/pi/data/"+\
-                        "_".join(row)+"_air_quality"+file_time+".csv"
-        else:
-            filename = fname
-        self.out_file = open(filename, "ab+")
-        self.results = csv.writer(out_file, delimiter = ",")
-        metadata = ["Time", "0.3 um", "0.5 um", "1.0 um",
-                    "2.5 um", "5.0 um", "10 um",
-                    "PM 1.0", "PM 2.5", "PM 10"]
-        self.results.writerow(metadata)
-
-
-    def close_file(self):
-
-        self.out_file.close()
-
-
-    def write_data(self, data):
-        self.results.writerow(data)
-
-    def send_files(self):
-        sys_cmd = 'scp {} pi@192.168.4.1:/home/pi/data'.format(
-                                                        self.aq_file.name)
-        print(sys_cmd)
-        os.system(sys_cmd)
 
 #-------------------------------------------------------------------------------
 # Methods for communication with the shared queue
